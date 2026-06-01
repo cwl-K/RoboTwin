@@ -59,6 +59,16 @@ def parse_response(object_name, target_name, relation):
     })
 
 
+def row_response(order):
+    return json.dumps({
+        "task_type": "row_order",
+        "object_names": order,
+        "order": order,
+        "target_name": "table",
+        "relation": "row",
+    })
+
+
 class GapaPlannerTest(unittest.TestCase):
     def setUp(self):
         self.scene = {
@@ -89,6 +99,34 @@ class GapaPlannerTest(unittest.TestCase):
         self.assertEqual(result.dsl.object_name, "red_block")
         self.assertEqual(result.dsl.target_name, "green_block")
         self.assertEqual(result.dsl.relation, "on")
+
+    def test_parse_rgb_row_order(self):
+        planner = TaskPlanner(
+            llm_client=FakeLLMClient(row_response(["red_block", "green_block", "blue_block"])),
+            use_llm=True,
+        )
+        result = planner.parse(
+            "Place the red block, green block, and blue block in the order of red, green, and blue from left to right, placing in a row.",
+            self.scene,
+        )
+        self.assertTrue(result.dsl.feasible)
+        self.assertEqual(result.dsl.task_type, "row_order")
+        self.assertEqual(result.dsl.relation, "row")
+        self.assertEqual(result.dsl.target_name, "table")
+        self.assertEqual(result.dsl.order, ["red_block", "green_block", "blue_block"])
+
+    def test_row_order_rejects_missing_object(self):
+        scene = {
+            "red_block": {"roles": ["source", "target"]},
+            "green_block": {"roles": ["source", "target"]},
+        }
+        planner = TaskPlanner(
+            llm_client=FakeLLMClient(row_response(["red_block", "green_block", "blue_block"])),
+            use_llm=True,
+        )
+        result = planner.parse("arrange red green blue blocks in a row", scene)
+        self.assertFalse(result.dsl.feasible)
+        self.assertIn("Current scene does not contain: blue_block", result.dsl.reason)
 
     def test_parse_drawer_task(self):
         planner = TaskPlanner(llm_client=FakeLLMClient(parse_response("mouse", "cabinet", "in")), use_llm=True)

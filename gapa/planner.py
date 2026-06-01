@@ -71,8 +71,13 @@ class TaskPlanner:
 
     def _parse_with_llm(self, text: str, scene_objects: dict[str, dict] | None) -> ParseResult:
         prompt = (
-            "Parse the robot task into JSON with keys object_name, target_name, relation. "
-            "Allowed relation values are in and on. Return only JSON.\n\n"
+            "Parse the robot task into JSON. Return only JSON.\n"
+            "For ordinary pick-and-place tasks, return keys: "
+            "task_type='place_relation', object_name, target_name, relation. "
+            "Allowed relation values are in and on.\n"
+            "For left-to-right row ordering tasks such as arranging red, green, and blue blocks in a row, "
+            "return keys: task_type='row_order', object_names, order, target_name='table', relation='row'. "
+            "The order list must contain canonical object names from left to right.\n\n"
             f"Objects and aliases:\n{_object_prompt_lines(scene_objects)}\n\n"
             f"Graspable source objects: {SOURCE_OBJECTS}.\n"
             f"Placement target objects: {TARGET_OBJECTS}.\n"
@@ -85,15 +90,34 @@ class TaskPlanner:
         data = _extract_json(raw)
         if not isinstance(data, dict):
             raise RuntimeError("LLM task parse response must be a JSON object.")
+        task_type = str(data.get("task_type") or "place_relation")
+        if task_type == "row_order":
+            raw_order = data.get("order") or data.get("object_names") or []
+            if not isinstance(raw_order, list):
+                raw_order = []
+            order = [canonical_object_name(str(name)) for name in raw_order]
+            dsl = TaskDSL(
+                raw_text=text,
+                object_name=order[0] if order else "",
+                target_name="table",
+                relation="row",
+                task_type="row_order",
+                object_names=order,
+                order=order,
+            )
+            return ParseResult(self._validate(dsl, scene_objects), "llm", True)
         dsl = TaskDSL(
             raw_text=text,
             object_name=canonical_object_name(str(data["object_name"])),
             target_name=canonical_object_name(str(data["target_name"])),
             relation=data["relation"],
+            task_type="place_relation",
         )
         return ParseResult(self._validate(dsl, scene_objects), "llm", True)
 
     def _validate(self, dsl: TaskDSL, scene_objects: dict[str, dict] | None) -> TaskDSL:
+        if dsl.task_type == "row_order":
+            return self._validate_row_order(dsl, scene_objects)
         if dsl.object_name not in SOURCE_OBJECTS:
             dsl.feasible = False
             dsl.reason = f"Unsupported or missing source object. Supported: {', '.join(SOURCE_OBJECTS)}."
@@ -134,4 +158,41 @@ class TaskPlanner:
             if "target" not in target_roles:
                 dsl.feasible = False
                 dsl.reason = f"Current scene object {dsl.target_name} is not a placement target."
+        return dsl
+
+    def _validate_row_order(self, dsl: TaskDSL, scene_objects: dict[str, dict] | None) -> TaskDSL:
+        order = dsl.order or dsl.object_names
+        if len(order) < 2:
+            dsl.feasible = False
+            dsl.reason = "Row ordering task requires at least two ordered objects."
+            return dsl
+        if len(set(order)) != len(order):
+            dsl.feasible = False
+            dsl.reason = "Row ordering task cannot repeat the same object."
+            return dsl
+        unsupported = [name for name in order if name not in SOURCE_OBJECTS]
+        if unsupported:
+            dsl.feasible = False
+            dsl.reason = f"Unsupported row source object(s): {', '.join(unsupported)}."
+            return dsl
+        if scene_objects is not None:
+            missing = [name for name in order if name not in scene_objects]
+            if missing:
+                dsl.feasible = False
+                dsl.reason = f"Current scene does not contain: {', '.join(missing)}."
+                return dsl
+            not_graspable = [
+                name
+                for name in order
+                if "source" not in set(scene_objects[name].get("roles", []))
+            ]
+            if not_graspable:
+                dsl.feasible = False
+                dsl.reason = f"Current scene object(s) are not graspable: {', '.join(not_graspable)}."
+                return dsl
+        dsl.object_name = order[0]
+        dsl.target_name = "table"
+        dsl.relation = "row"
+        dsl.object_names = list(order)
+        dsl.order = list(order)
         return dsl

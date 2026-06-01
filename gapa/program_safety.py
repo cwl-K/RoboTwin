@@ -21,6 +21,7 @@ ALLOWED_API_METHODS = {
     "choose_arm_for_path",
     "clearance",
     "clearance_from_poses",
+    "row_target_pose",
     "grasp",
     "grasp_at",
     "move_up",
@@ -30,6 +31,8 @@ ALLOWED_API_METHODS = {
     "open_drawer",
     "place_at",
     "place_in_drawer",
+    "pick_and_place_at",
+    "place_in_row",
     "place_on",
     "place_in",
     "place_on_center",
@@ -54,6 +57,7 @@ RETURN_VALUE_API_METHODS = {
     "choose_arm_for_path",
     "clearance",
     "clearance_from_poses",
+    "row_target_pose",
 }
 
 

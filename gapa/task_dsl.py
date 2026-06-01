@@ -6,7 +6,8 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
 
-Relation = Literal["in", "on"]
+Relation = Literal["in", "on", "row"]
+TaskType = Literal["place_relation", "row_order"]
 SkillName = Literal["grasp_object", "place_in", "place_on"]
 
 
@@ -16,6 +17,9 @@ class TaskDSL:
     object_name: str
     target_name: str
     relation: Relation
+    task_type: TaskType = "place_relation"
+    object_names: list[str] = field(default_factory=list)
+    order: list[str] = field(default_factory=list)
     feasible: bool = True
     reason: str = ""
 

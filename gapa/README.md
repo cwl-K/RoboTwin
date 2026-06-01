@@ -139,6 +139,7 @@ LLM 必须返回 JSON：`{"programs": [{"program_id": "...", "source": "def play
 - `api.choose_arm_for_path(name, target)`
 - `api.clearance(name, target=None)`
 - `api.clearance_from_poses(source_pose, target_pose)`
+- `api.row_target_pose(row_index, row_count=3, ...)`
 - `api.grasp(...)`
 - `api.grasp_at(name, source_pose, ...)`
 - `api.move_up(...)`
@@ -148,6 +149,8 @@ LLM 必须返回 JSON：`{"programs": [{"program_id": "...", "source": "def play
 - `api.open_drawer(cabinet, arm, ...)`
 - `api.place_at(name, target_pose, ...)`
 - `api.place_in_drawer(name, cabinet, target_pose, arm, ...)`
+- `api.pick_and_place_at(name, target_pose, ...)`
+- `api.place_in_row(name, row_index, ...)`
 - `api.place_on(...)`
 - `api.place_in(...)`
 - `api.place_on_center(...)`
@@ -167,6 +170,8 @@ x >= 0 -> right
 当前 `api.pose()` 和 `api.target_pose()` 仍然直接从仿真环境读取对象/目标位姿。后续如果接入 VLM，可以把这两个 API 的实现替换成“图像 2D 检测 -> 相机标定/深度 -> 3D pose”，上层 LLM 生成的 `play_once(api)` 结构不需要大改。
 
 `cabinet/drawer` 任务使用官方 `put_object_cabinet` 的双臂思路：一只手抓住桌面物体，另一只手通过 `open_drawer()` 抓抽屉把手并向外拉，再用 `place_in_drawer()` 把物体放到 `drawer_target_pose()`。
+
+`row_order` 任务参考官方 `blocks_ranking_rgb`：`row_target_pose()` 生成桌面左中右目标位姿，`pick_and_place_at()` 或 `place_in_row()` 逐个把方块放到行内位置，success check 检查相邻方块 `x` 递增、`y` 接近且两只夹爪打开。
 
 对于 cup/bowl，会根据左右臂自动选择接触点。现在没有 oracle teleport 修正：如果生成程序调用的动作失败，或者最后 success check 失败，就记录失败。
 
@@ -268,6 +273,7 @@ runs_gapa/{run_id}/task_dsl.json
 - 单步 `put/place source in target`
 - 单步 `put/place source on target`
 - 双臂抽屉任务 `put/place source in drawer/cabinet`
+- 多物体排队任务，例如 `Place the red block, green block, and blue block in the order of red, green, and blue from left to right, placing in a row.`
 - 中英文物体别名
 - 用户手动选择场景物体
 - 四相机初始图

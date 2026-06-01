@@ -197,6 +197,26 @@ class SafeSkillAPI:
             return 0.10
         return 0.08
 
+    def row_target_pose(
+        self,
+        row_index: int,
+        row_count: int = 3,
+        center_x: float = 0.0,
+        y: float = -0.15,
+        spacing: float = 0.08,
+    ) -> list[float]:
+        """Return a tabletop target pose for a left-to-right row layout."""
+
+        count = int(row_count)
+        index = int(row_index)
+        if count < 2:
+            raise ProgramExecutionError("row_target_pose", "row_count must be at least 2.")
+        if index < 0 or index >= count:
+            raise ProgramExecutionError("row_target_pose", "row_index is outside the row.")
+        x = float(center_x) + (index - (count - 1) / 2.0) * float(spacing)
+        z = 0.74 + float(getattr(self.env, "table_z_bias", 0.0))
+        return [x, float(y), z, 0.0, 1.0, 0.0, 0.0]
+
     def grasp(
         self,
         name: str,
@@ -449,6 +469,73 @@ class SafeSkillAPI:
             dis=dis,
             relation="in",
             target_name=cabinet,
+        )
+
+    def pick_and_place_at(
+        self,
+        name: str,
+        target_pose: list[float],
+        arm: str | None = None,
+        pre_grasp_dis: float = 0.09,
+        grasp_dis: float = 0.01,
+        lift_z: float = 0.07,
+        functional_point_id: int | None = 0,
+        pre_dis: float = 0.09,
+        dis: float = 0.02,
+        constrain: str = "align",
+        pre_dis_axis: str = "grasp",
+        relation: str = "at",
+        target_name: str | None = None,
+    ) -> None:
+        target_pose_list = _pose_to_list(target_pose)
+        source_pose = self.pose(name)
+        arm = arm or self.choose_arm_from_pose(source_pose)
+        self.grasp_at(
+            name,
+            source_pose,
+            arm=arm,
+            pre_grasp_dis=pre_grasp_dis,
+            grasp_dis=grasp_dis,
+        )
+        self.move_up(arm, z=lift_z, move_axis="world")
+        self.place_at(
+            name,
+            target_pose_list,
+            arm=arm,
+            functional_point_id=functional_point_id,
+            pre_dis=pre_dis,
+            dis=dis,
+            constrain=constrain,
+            pre_dis_axis=pre_dis_axis,
+            relation=relation,
+            target_name=target_name,
+        )
+        self.move_above_pose(target_pose_list, arm=arm, z=lift_z, move_axis="arm")
+
+    def place_in_row(
+        self,
+        name: str,
+        row_index: int,
+        row_count: int = 3,
+        y: float = -0.15,
+        spacing: float = 0.08,
+        arm: str | None = None,
+        pre_grasp_dis: float = 0.09,
+        lift_z: float = 0.07,
+    ) -> None:
+        target_pose = self.row_target_pose(row_index=row_index, row_count=row_count, y=y, spacing=spacing)
+        self.pick_and_place_at(
+            name,
+            target_pose,
+            arm=arm,
+            pre_grasp_dis=pre_grasp_dis,
+            lift_z=lift_z,
+            functional_point_id=0,
+            pre_dis=0.09,
+            dis=0.02,
+            constrain="align",
+            relation="row",
+            target_name="row_target",
         )
 
     def place_at(

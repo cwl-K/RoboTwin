@@ -35,6 +35,17 @@ def play_once(api):
 """.strip()
 
 
+ROW_SOURCE = """
+def play_once(api):
+    red_target = api.row_target_pose(0, row_count=3, y=-0.15, spacing=0.08)
+    green_target = api.row_target_pose(1, row_count=3, y=-0.15, spacing=0.08)
+    blue_target = api.row_target_pose(2, row_count=3, y=-0.15, spacing=0.08)
+    api.pick_and_place_at("red_block", red_target, pre_grasp_dis=0.09, grasp_dis=0.01, lift_z=0.07, functional_point_id=0, pre_dis=0.09, dis=0.02, constrain="align", relation="row", target_name="row_target")
+    api.pick_and_place_at("green_block", green_target, pre_grasp_dis=0.09, grasp_dis=0.01, lift_z=0.07, functional_point_id=0, pre_dis=0.09, dis=0.02, constrain="align", relation="row", target_name="row_target")
+    api.pick_and_place_at("blue_block", blue_target, pre_grasp_dis=0.09, grasp_dis=0.01, lift_z=0.07, functional_point_id=0, pre_dis=0.09, dis=0.02, constrain="align", relation="row", target_name="row_target")
+""".strip()
+
+
 class FakeLLMClient:
     def __init__(self, response, configured=True):
         self.response = response
@@ -83,10 +94,13 @@ class FakeEnv:
             "cup": FakeActor([-0.1, 0.0, 0.76]),
             "plate": FakeActor([0.0, -0.13, 0.74]),
             "red_block": FakeActor([-0.2, -0.1, 0.76]),
+            "green_block": FakeActor([0.2, -0.1, 0.76]),
+            "blue_block": FakeActor([-0.1, 0.04, 0.76]),
             "mouse": FakeActor([-0.2, -0.1, 0.76]),
             "cabinet": FakeActor([0.0, 0.155, 0.74]),
         }
         self.gapa_specs = {}
+        self.table_z_bias = 0.0
 
     def get_actor(self, name):
         return self.actors[name]
@@ -132,6 +146,10 @@ class ProgramSafetyTest(unittest.TestCase):
         report = validate_program_source(CABINET_SOURCE)
         self.assertTrue(report.ok)
 
+    def test_valid_row_program_passes(self):
+        report = validate_program_source(ROW_SOURCE)
+        self.assertTrue(report.ok)
+
     def test_invalid_programs_are_rejected(self):
         invalid_sources = [
             "import os\ndef play_once(api):\n    pass",
@@ -140,6 +158,7 @@ class ProgramSafetyTest(unittest.TestCase):
             "def play_once(api):\n    grasp('cup')",
             "def play_once(api):\n    api.fly('cup')",
             "def play_once(api):\n    api.pose('cup')",
+            "def play_once(api):\n    api.row_target_pose(0)",
             "def play_once(api):\n    for i in [1]:\n        api.pose('cup')",
             "class X:\n    pass\ndef play_once(api):\n    pass",
         ]
@@ -248,6 +267,32 @@ class SafeSkillAPITest(unittest.TestCase):
         self.assertEqual(len(place_calls), 1)
         self.assertEqual(place_calls[0][1]["target_pose"], drawer_pose)
         self.assertIsNone(place_calls[0][1]["functional_point_id"])
+
+    def test_row_helpers_call_robotwin_wrappers(self):
+        env = FakeEnv()
+        api = SafeSkillAPI(env)
+
+        red_target = api.row_target_pose(0, row_count=3, y=-0.15, spacing=0.08)
+        green_target = api.row_target_pose(1, row_count=3, y=-0.15, spacing=0.08)
+
+        self.assertAlmostEqual(red_target[0], -0.08)
+        self.assertAlmostEqual(green_target[0], 0.0)
+        self.assertAlmostEqual(red_target[1], -0.15)
+
+        api.pick_and_place_at("red_block", red_target, relation="row", target_name="row_target")
+        api.place_in_row("green_block", row_index=1, row_count=3, y=-0.15, spacing=0.08)
+
+        grasp_calls = [call for call in env.calls if call[0] == "grasp_actor"]
+        place_calls = [call for call in env.calls if call[0] == "place_actor"]
+        lift_calls = [
+            call for call in env.calls
+            if call[0] == "move_by_displacement" and call[1].get("z") == 0.07
+        ]
+        self.assertEqual(len(grasp_calls), 2)
+        self.assertEqual(len(place_calls), 2)
+        self.assertGreaterEqual(len(lift_calls), 2)
+        self.assertEqual(place_calls[0][1]["target_pose"], red_target)
+        self.assertAlmostEqual(place_calls[1][1]["target_pose"][0], 0.0)
 
     def test_execute_program_candidate(self):
         env = FakeEnv()

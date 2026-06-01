@@ -335,6 +335,39 @@ class GapaScene(Base_Task):
     def get_success_details(self) -> dict[str, Any]:
         if self.active_task is None:
             return {"success": False, "reason": "No active task."}
+        if getattr(self.active_task, "task_type", None) == "row_order" or self.active_task.relation == "row":
+            order = self.active_task.order or self.active_task.object_names
+            if len(order) < 2:
+                return {"success": False, "mode": "row_order", "reason": "Row order has fewer than two objects."}
+            object_poses = {name: np.array(self.get_actor(name).get_pose().p) for name in order}
+            eps = np.array([0.13, 0.03])
+            adjacent = []
+            for left_name, right_name in zip(order[:-1], order[1:]):
+                left_pose = object_poses[left_name]
+                right_pose = object_poses[right_name]
+                xy_abs = np.abs(left_pose[:2] - right_pose[:2])
+                adjacent.append({
+                    "left": left_name,
+                    "right": right_name,
+                    "xy_abs": xy_abs.tolist(),
+                    "xy_ok": bool(np.all(xy_abs < eps)),
+                    "x_order_ok": bool(left_pose[0] < right_pose[0]),
+                })
+            row_ok = all(item["xy_ok"] and item["x_order_ok"] for item in adjacent)
+            left_open = self.is_left_gripper_open()
+            right_open = self.is_right_gripper_open()
+            success = bool(row_ok and left_open and right_open)
+            return {
+                "success": success,
+                "mode": "row_order_official_rgb",
+                "order": list(order),
+                "object_poses": {name: pose.tolist() for name, pose in object_poses.items()},
+                "adjacent_checks": adjacent,
+                "xy_limit": eps.tolist(),
+                "row_ok": bool(row_ok),
+                "left_gripper_open": bool(left_open),
+                "right_gripper_open": bool(right_open),
+            }
         obj = self.get_actor(self.active_task.object_name)
         target = self.get_actor(self.active_task.target_name)
         obj_p = np.array(obj.get_pose().p)
