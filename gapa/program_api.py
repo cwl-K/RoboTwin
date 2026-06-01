@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -64,6 +65,45 @@ def _choose_arm_for_actor(actor: Any) -> ArmTag:
     return ArmTag("left" if actor.get_pose().p[0] < 0 else "right")
 
 
+def _actor_xy(actor: Any) -> tuple[float, float]:
+    pose = actor.get_pose()
+    return float(pose.p[0]), float(pose.p[1])
+
+
+def _pose_to_list(pose: Any) -> list[float]:
+    if hasattr(pose, "p") and hasattr(pose, "q"):
+        values = list(pose.p.tolist()) + list(pose.q.tolist())
+    elif hasattr(pose, "tolist"):
+        values = list(pose.tolist())
+    elif isinstance(pose, (list, tuple)):
+        values = list(pose)
+    else:
+        raise ValueError(f"Unsupported pose value: {pose!r}")
+    if len(values) == 3:
+        values = values + [1.0, 0.0, 0.0, 0.0]
+    if len(values) != 7:
+        raise ValueError(f"Pose must have 3 or 7 values, got {len(values)}.")
+    return [float(value) for value in values]
+
+
+def _pose_xy(pose: Any) -> tuple[float, float]:
+    pose_list = _pose_to_list(pose)
+    return pose_list[0], pose_list[1]
+
+
+def _pose_distance_xy(source_pose: Any, target_pose: Any) -> float:
+    x1, y1 = _pose_xy(source_pose)
+    x2, y2 = _pose_xy(target_pose)
+    return float(math.hypot(x1 - x2, y1 - y2))
+
+
+def _offset_pose_xy(pose: Any, dx: float, dy: float) -> list[float]:
+    shifted = _pose_to_list(pose)
+    shifted[0] += float(dx)
+    shifted[1] += float(dy)
+    return shifted
+
+
 def _default_contact_point(env: Any, object_name: str, arm_tag: ArmTag, requested: Any = None) -> Any:
     if requested is not None:
         return requested
@@ -85,11 +125,77 @@ class SafeSkillAPI:
 
     def pose(self, name: str) -> list[float]:
         actor = self.env.get_actor(name)
-        pose = actor.get_pose()
-        return pose.p.tolist() + pose.q.tolist()
+        return _pose_to_list(actor.get_pose())
+
+    def target_pose(self, name: str, relation: str = "on") -> list[float]:
+        return _pose_to_list(self.env.get_target_pose(name, relation=relation))
+
+    def drawer_pose(self, cabinet: str) -> list[float]:
+        return self.pose(cabinet)
+
+    def drawer_target_pose(self, cabinet: str) -> list[float]:
+        return self.target_pose(cabinet, relation="in")
+
+    def opposite_arm(self, arm: str) -> str:
+        return str(ArmTag(arm).opposite)
+
+    def distance(self, name: str, target: str) -> float:
+        """Return tabletop XY distance in meters."""
+
+        x1, y1 = _actor_xy(self.env.get_actor(name))
+        x2, y2 = _actor_xy(self.env.get_actor(target))
+        return float(math.hypot(x1 - x2, y1 - y2))
+
+    def distance_between_poses(self, source_pose: list[float], target_pose: list[float]) -> float:
+        return _pose_distance_xy(source_pose, target_pose)
+
+    def is_left_of(self, name: str, target: str) -> bool:
+        return _actor_xy(self.env.get_actor(name))[0] < _actor_xy(self.env.get_actor(target))[0]
+
+    def is_right_of(self, name: str, target: str) -> bool:
+        return _actor_xy(self.env.get_actor(name))[0] > _actor_xy(self.env.get_actor(target))[0]
 
     def choose_arm(self, name: str) -> str:
         return str(_choose_arm_for_actor(self.env.get_actor(name)))
+
+    def choose_arm_from_pose(self, pose: list[float]) -> str:
+        return "left" if _pose_xy(pose)[0] < 0 else "right"
+
+    def choose_arm_for_path(self, name: str, target: str) -> str:
+        """Choose an arm from the source side, falling back to the target side near center."""
+
+        obj_x = _actor_xy(self.env.get_actor(name))[0]
+        target_x = _actor_xy(self.env.get_actor(target))[0]
+        if obj_x < -0.04:
+            return "left"
+        if obj_x > 0.04:
+            return "right"
+        return "left" if target_x < 0 else "right"
+
+    def clearance(self, name: str, target: str | None = None) -> float:
+        """Return a conservative lift height for the current source-target geometry."""
+
+        height = 0.08
+        if target is not None:
+            xy_distance = self.distance(name, target)
+            if xy_distance > 0.24:
+                height = 0.12
+            elif xy_distance > 0.16:
+                height = 0.10
+            target_spec = getattr(self.env, "gapa_specs", {}).get(target)
+            if getattr(target_spec, "kind", None) == "box":
+                height = max(height, 0.09)
+        return height
+
+    def clearance_from_poses(self, source_pose: list[float], target_pose: list[float]) -> float:
+        """Return a conservative lift height from explicit source/target poses."""
+
+        xy_distance = self.distance_between_poses(source_pose, target_pose)
+        if xy_distance > 0.24:
+            return 0.12
+        if xy_distance > 0.16:
+            return 0.10
+        return 0.08
 
     def grasp(
         self,
@@ -100,8 +206,29 @@ class SafeSkillAPI:
         gripper_pos: float = 0.0,
         contact_point_id: int | list[int] | None = None,
     ) -> None:
+        self.grasp_at(
+            name,
+            self.pose(name),
+            arm=arm,
+            pre_grasp_dis=pre_grasp_dis,
+            grasp_dis=grasp_dis,
+            gripper_pos=gripper_pos,
+            contact_point_id=contact_point_id,
+        )
+
+    def grasp_at(
+        self,
+        name: str,
+        source_pose: list[float],
+        arm: str | None = None,
+        pre_grasp_dis: float = 0.09,
+        grasp_dis: float = 0.0,
+        gripper_pos: float = 0.0,
+        contact_point_id: int | list[int] | None = None,
+    ) -> None:
+        _pose_to_list(source_pose)
         actor = self.env.get_actor(name)
-        arm_tag = ArmTag(arm) if arm else _choose_arm_for_actor(actor)
+        arm_tag = ArmTag(arm) if arm else ArmTag(self.choose_arm_from_pose(source_pose))
         grasp_action = self.env.grasp_actor(
             actor,
             arm_tag=arm_tag,
@@ -117,6 +244,9 @@ class SafeSkillAPI:
         self._require_moved(moved, "grasp", f"grasp({name}) motion failed.")
         self.held[name] = arm_tag
         self.last_gripper = arm_tag
+        active_task = getattr(self.env, "active_task", None)
+        if active_task is not None and getattr(active_task, "object_name", None) == name:
+            setattr(self.env, "gapa_task_arm_tag", str(arm_tag))
         self._snapshot(f"grasp_{name}")
 
     def move_up(self, arm: str, z: float = 0.08, move_axis: str = "world") -> None:
@@ -124,6 +254,33 @@ class SafeSkillAPI:
         moved = self.env.move(self.env.move_by_displacement(arm_tag=arm_tag, z=float(z), move_axis=move_axis))
         self._require_moved(moved, "move_up", f"move_up({arm}) failed.")
         self._snapshot(f"move_up_{arm}")
+
+    def move_above(self, name: str, arm: str | None = None, z: float | None = None, move_axis: str = "world") -> None:
+        actor = self.env.get_actor(name)
+        arm_tag = ArmTag(arm) if arm else self.held.get(name) or _choose_arm_for_actor(actor)
+        self.move_above_pose(self.pose(name), arm=str(arm_tag), z=self.clearance(name) if z is None else z, move_axis=move_axis)
+
+    def move_above_pose(
+        self,
+        pose: list[float],
+        arm: str | None = None,
+        z: float = 0.08,
+        move_axis: str = "world",
+    ) -> None:
+        arm_tag = ArmTag(arm) if arm else ArmTag(self.choose_arm_from_pose(pose))
+        lift_z = float(z)
+        moved = self.env.move(self.env.move_by_displacement(arm_tag=arm_tag, z=lift_z, move_axis=move_axis))
+        self._require_moved(moved, "move_above", "move_above_pose failed.")
+        self._snapshot(f"move_above_pose_{arm_tag}")
+
+    def clear_path(self, name: str, target: str, arm: str | None = None, z: float | None = None) -> None:
+        arm = arm or self.choose_arm_for_path(name, target)
+        self.move_above_pose(
+            self.pose(name),
+            arm=arm,
+            z=self.clearance(name, target) if z is None else z,
+            move_axis="world",
+        )
 
     def place_on(
         self,
@@ -136,7 +293,67 @@ class SafeSkillAPI:
         constrain: str = "auto",
         pre_dis_axis: str = "grasp",
     ) -> None:
-        self._place(name, target, "on", arm, functional_point_id, pre_dis, dis, constrain, pre_dis_axis)
+        self.place_at(
+            name,
+            self.target_pose(target, relation="on"),
+            arm=arm,
+            functional_point_id=functional_point_id,
+            pre_dis=pre_dis,
+            dis=dis,
+            constrain=constrain,
+            pre_dis_axis=pre_dis_axis,
+            relation="on",
+            target_name=target,
+        )
+
+    def place_on_center(
+        self,
+        name: str,
+        target: str,
+        arm: str | None = None,
+        pre_dis: float = 0.08,
+        dis: float = 0.02,
+        constrain: str = "auto",
+        pre_dis_axis: str = "grasp",
+    ) -> None:
+        self.place_at(
+            name,
+            self.target_pose(target, relation="on"),
+            arm=arm,
+            functional_point_id=0,
+            pre_dis=pre_dis,
+            dis=dis,
+            constrain=constrain,
+            pre_dis_axis=pre_dis_axis,
+            relation="on",
+            target_name=target,
+        )
+
+    def place_on_offset(
+        self,
+        name: str,
+        target: str,
+        dx: float = 0.0,
+        dy: float = 0.0,
+        arm: str | None = None,
+        pre_dis: float = 0.08,
+        dis: float = 0.02,
+        constrain: str = "auto",
+        pre_dis_axis: str = "grasp",
+    ) -> None:
+        target_pose = _offset_pose_xy(self.target_pose(target, relation="on"), float(dx), float(dy))
+        self.place_at(
+            name,
+            target_pose,
+            arm=arm,
+            functional_point_id=0,
+            pre_dis=pre_dis,
+            dis=dis,
+            constrain=constrain,
+            pre_dis_axis=pre_dis_axis,
+            relation="on",
+            target_name=target,
+        )
 
     def place_in(
         self,
@@ -149,7 +366,116 @@ class SafeSkillAPI:
         constrain: str = "auto",
         pre_dis_axis: str = "grasp",
     ) -> None:
-        self._place(name, target, "in", arm, functional_point_id, pre_dis, dis, constrain, pre_dis_axis)
+        self.place_at(
+            name,
+            self.target_pose(target, relation="in"),
+            arm=arm,
+            functional_point_id=functional_point_id,
+            pre_dis=pre_dis,
+            dis=dis,
+            constrain=constrain,
+            pre_dis_axis=pre_dis_axis,
+            relation="in",
+            target_name=target,
+        )
+
+    def place_in_center(
+        self,
+        name: str,
+        target: str,
+        arm: str | None = None,
+        pre_dis: float = 0.08,
+        dis: float = 0.02,
+        constrain: str = "auto",
+        pre_dis_axis: str = "grasp",
+    ) -> None:
+        self.place_at(
+            name,
+            self.target_pose(target, relation="in"),
+            arm=arm,
+            functional_point_id=0,
+            pre_dis=pre_dis,
+            dis=dis,
+            constrain=constrain,
+            pre_dis_axis=pre_dis_axis,
+            relation="in",
+            target_name=target,
+        )
+
+    def open_drawer(
+        self,
+        cabinet: str,
+        arm: str,
+        pre_grasp_dis: float = 0.05,
+        pull_dis: float = 0.04,
+        pull_steps: int = 4,
+    ) -> None:
+        actor = self.env.get_actor(cabinet)
+        arm_tag = ArmTag(arm)
+        grasp_action = self.env.grasp_actor(
+            actor,
+            arm_tag=arm_tag,
+            pre_grasp_dis=float(pre_grasp_dis),
+            grasp_dis=0.0,
+            gripper_pos=0.0,
+            contact_point_id=None,
+        )
+        moved = self.env.move(grasp_action)
+        self._require_moved(moved, "open_drawer", f"open_drawer({cabinet}) grasp failed.")
+        self.held[cabinet] = arm_tag
+        self.last_gripper = arm_tag
+        self._snapshot(f"grasp_drawer_{cabinet}")
+
+        for step_index in range(int(pull_steps)):
+            moved = self.env.move(self.env.move_by_displacement(arm_tag=arm_tag, y=-float(pull_dis)))
+            self._require_moved(moved, "open_drawer", f"open_drawer({cabinet}) pull step {step_index + 1} failed.")
+            self._snapshot(f"pull_drawer_{cabinet}_{step_index + 1}")
+
+    def place_in_drawer(
+        self,
+        name: str,
+        cabinet: str,
+        target_pose: list[float],
+        arm: str,
+        pre_dis: float = 0.13,
+        dis: float = 0.1,
+    ) -> None:
+        self.place_at(
+            name,
+            target_pose,
+            arm=arm,
+            functional_point_id=None,
+            pre_dis=pre_dis,
+            dis=dis,
+            relation="in",
+            target_name=cabinet,
+        )
+
+    def place_at(
+        self,
+        name: str,
+        target_pose: list[float],
+        arm: str | None = None,
+        functional_point_id: int | None = 0,
+        pre_dis: float = 0.08,
+        dis: float = 0.02,
+        constrain: str = "auto",
+        pre_dis_axis: str = "grasp",
+        relation: str = "at",
+        target_name: str | None = None,
+    ) -> None:
+        self._place_at(
+            name=name,
+            target_pose=_pose_to_list(target_pose),
+            arm=arm,
+            functional_point_id=functional_point_id,
+            pre_dis=pre_dis,
+            dis=dis,
+            constrain=constrain,
+            pre_dis_axis=pre_dis_axis,
+            relation=relation,
+            target_name=target_name,
+        )
 
     def back_to_origin(self, arm: str) -> None:
         arm_tag = ArmTag(arm)
@@ -157,10 +483,10 @@ class SafeSkillAPI:
         self._require_moved(moved, "back_to_origin", f"back_to_origin({arm}) failed.")
         self._snapshot(f"back_to_origin_{arm}")
 
-    def _place(
+    def _place_at(
         self,
         name: str,
-        target: str,
+        target_pose: list[float],
         relation: str,
         arm: str | None,
         functional_point_id: int | None,
@@ -168,10 +494,10 @@ class SafeSkillAPI:
         dis: float,
         constrain: str,
         pre_dis_axis: str,
+        target_name: str | None = None,
     ) -> None:
         actor = self.env.get_actor(name)
         arm_tag = ArmTag(arm) if arm else self.held.get(name) or _choose_arm_for_actor(actor)
-        target_pose = self.env.get_target_pose(target, relation=relation)
         moved = self.env.move(
             self.env.place_actor(
                 actor,
@@ -185,10 +511,11 @@ class SafeSkillAPI:
                 pre_dis_axis=pre_dis_axis,
             )
         )
-        self._require_moved(moved, f"place_{relation}", f"place_{relation}({name}, {target}) failed.")
+        target_label = target_name or "target_pose"
+        self._require_moved(moved, f"place_{relation}", f"place_{relation}({name}, {target_label}) failed.")
         self.held.pop(name, None)
         self.last_gripper = arm_tag
-        self._snapshot(f"place_{relation}_{name}_{target}")
+        self._snapshot(f"place_{relation}_{name}_{target_label}")
 
     def _require_moved(self, moved: Any, stage: str, message: str) -> None:
         if not moved or not self.env.plan_success:
@@ -227,6 +554,11 @@ def execute_program_candidate(
     env.active_task = task
     env.active_plan = None
     env.plan_success = True
+    try:
+        env.gapa_task_origin_z = float(env.get_actor(task.object_name).get_pose().p[2])
+        env.gapa_task_arm_tag = None
+    except Exception:
+        pass
     api = SafeSkillAPI(env, run_dir=run_dir, generate_id=generate_id, attempt_id=attempt_id)
     try:
         validate_program_source(candidate.source)

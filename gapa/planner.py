@@ -7,8 +7,17 @@ from dataclasses import dataclass
 from typing import Any
 
 from .llm_client import LLMClient
-from .object_registry import OBJECT_SPECS, SOURCE_OBJECTS, TARGET_OBJECTS
+from .object_registry import (
+    OBJECT_SPECS,
+    OFFICIAL_CABINET_SOURCE_OBJECTS,
+    SOURCE_OBJECTS,
+    TARGET_OBJECTS,
+    canonical_object_name,
+)
 from .task_dsl import TaskDSL
+
+
+CABINET_SOURCE_OBJECTS = set(OFFICIAL_CABINET_SOURCE_OBJECTS)
 
 
 @dataclass(frozen=True)
@@ -78,8 +87,8 @@ class TaskPlanner:
             raise RuntimeError("LLM task parse response must be a JSON object.")
         dsl = TaskDSL(
             raw_text=text,
-            object_name=data["object_name"],
-            target_name=data["target_name"],
+            object_name=canonical_object_name(str(data["object_name"])),
+            target_name=canonical_object_name(str(data["target_name"])),
             relation=data["relation"],
         )
         return ParseResult(self._validate(dsl, scene_objects), "llm", True)
@@ -96,6 +105,14 @@ class TaskPlanner:
         if dsl.object_name == dsl.target_name:
             dsl.feasible = False
             dsl.reason = "Source object and target must be different."
+            return dsl
+        if dsl.target_name == "cabinet" and dsl.relation == "in" and dsl.object_name not in CABINET_SOURCE_OBJECTS:
+            dsl.feasible = False
+            supported = ", ".join(sorted(CABINET_SOURCE_OBJECTS))
+            dsl.reason = (
+                "Cabinet drawer MVP follows RoboTwin put_object_cabinet-style small-object placement "
+                f"and currently supports only: {supported}."
+            )
             return dsl
         target_spec = OBJECT_SPECS[dsl.target_name]
         if dsl.relation not in target_spec.target_relations:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Literal
 
@@ -25,11 +26,13 @@ class GapaObjectSpec:
     convex: bool = True
     is_static: bool = False
     mass: float = 0.03
-    kind: Literal["actor", "box"] = "actor"
+    kind: Literal["actor", "box", "urdf"] = "actor"
     half_size: tuple[float, float, float] | None = None
     color: tuple[float, float, float] | None = None
     z: float = 0.741
     target_z_offset: float = 0.05
+    rotate_rand: bool = False
+    rotate_lim: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
     @property
     def can_grasp(self) -> bool:
@@ -38,6 +41,43 @@ class GapaObjectSpec:
     @property
     def can_target(self) -> bool:
         return "target" in self.roles
+
+
+OFFICIAL_CABINET_SOURCE_OBJECTS = (
+    "mouse",
+    "stapler",
+    "toy_car",
+    "rubiks_cube",
+    "bread",
+    "phone",
+    "playing_cards",
+    "tea_box",
+    "coffee_box",
+    "soap",
+)
+
+
+def _official_cabinet_source(
+    *,
+    alias: str,
+    label: str,
+    modelname: str,
+    aliases: tuple[str, ...],
+    footprint_radius: float = 0.06,
+) -> GapaObjectSpec:
+    return GapaObjectSpec(
+        alias=alias,
+        label=label,
+        modelname=modelname,
+        model_id=0,
+        roles=("source",),
+        qpos=[0.707, 0.707, 0.0, 0.0],
+        footprint_radius=footprint_radius,
+        aliases=aliases,
+        mass=0.01,
+        rotate_rand=True,
+        rotate_lim=(0.0, math.pi / 3.0, 0.0),
+    )
 
 
 OBJECT_SPECS: dict[str, GapaObjectSpec] = {
@@ -83,6 +123,90 @@ OBJECT_SPECS: dict[str, GapaObjectSpec] = {
         is_static=True,
         mass=0.2,
     ),
+    "cabinet": GapaObjectSpec(
+        alias="cabinet",
+        label="Cabinet drawer",
+        modelname="036_cabinet",
+        model_id=46653,
+        roles=("target",),
+        qpos=[1.0, 0.0, 0.0, 1.0],
+        footprint_radius=0.14,
+        aliases=("cabinet", "drawer", "cabinet drawer", "抽屉", "柜子", "柜子的抽屉"),
+        target_relations=("in",),
+        default_relation="in",
+        kind="urdf",
+        mass=0.0,
+    ),
+    "mouse": _official_cabinet_source(
+        alias="mouse",
+        label="Mouse",
+        modelname="047_mouse",
+        aliases=("mouse", "computer mouse", "鼠标"),
+        footprint_radius=0.055,
+    ),
+    "stapler": _official_cabinet_source(
+        alias="stapler",
+        label="Stapler",
+        modelname="048_stapler",
+        aliases=("stapler", "订书机"),
+        footprint_radius=0.065,
+    ),
+    "toy_car": _official_cabinet_source(
+        alias="toy_car",
+        label="Toy car",
+        modelname="057_toycar",
+        aliases=("toy car", "toy_car", "toycar", "car", "玩具车", "小车"),
+        footprint_radius=0.075,
+    ),
+    "rubiks_cube": _official_cabinet_source(
+        alias="rubiks_cube",
+        label="Rubik's cube",
+        modelname="073_rubikscube",
+        aliases=("rubik's cube", "rubiks cube", "rubik cube", "rubikscube", "magic cube", "魔方"),
+        footprint_radius=0.055,
+    ),
+    "bread": _official_cabinet_source(
+        alias="bread",
+        label="Bread",
+        modelname="075_bread",
+        aliases=("bread", "面包"),
+        footprint_radius=0.065,
+    ),
+    "phone": _official_cabinet_source(
+        alias="phone",
+        label="Phone",
+        modelname="077_phone",
+        aliases=("phone", "mobile phone", "cell phone", "手机", "电话"),
+        footprint_radius=0.070,
+    ),
+    "playing_cards": _official_cabinet_source(
+        alias="playing_cards",
+        label="Playing cards",
+        modelname="081_playingcards",
+        aliases=("playing cards", "playing_cards", "playingcards", "cards", "扑克牌", "纸牌"),
+        footprint_radius=0.060,
+    ),
+    "tea_box": _official_cabinet_source(
+        alias="tea_box",
+        label="Tea box",
+        modelname="112_tea-box",
+        aliases=("tea box", "tea_box", "tea-box", "茶盒", "茶叶盒"),
+        footprint_radius=0.065,
+    ),
+    "coffee_box": _official_cabinet_source(
+        alias="coffee_box",
+        label="Coffee box",
+        modelname="113_coffee-box",
+        aliases=("coffee box", "coffee_box", "coffee-box", "咖啡盒"),
+        footprint_radius=0.065,
+    ),
+    "soap": _official_cabinet_source(
+        alias="soap",
+        label="Soap",
+        modelname="107_soap",
+        aliases=("soap", "肥皂", "香皂"),
+        footprint_radius=0.055,
+    ),
     "red_block": GapaObjectSpec(
         alias="red_block",
         label="Red block",
@@ -99,6 +223,8 @@ OBJECT_SPECS: dict[str, GapaObjectSpec] = {
         color=(1.0, 0.0, 0.0),
         z=0.766,
         mass=0.02,
+        rotate_rand=True,
+        rotate_lim=(0.0, 0.0, 0.75),
     ),
     "green_block": GapaObjectSpec(
         alias="green_block",
@@ -116,6 +242,8 @@ OBJECT_SPECS: dict[str, GapaObjectSpec] = {
         color=(0.0, 0.75, 0.1),
         z=0.766,
         mass=0.02,
+        rotate_rand=True,
+        rotate_lim=(0.0, 0.0, 0.75),
     ),
     "blue_block": GapaObjectSpec(
         alias="blue_block",
@@ -133,6 +261,8 @@ OBJECT_SPECS: dict[str, GapaObjectSpec] = {
         color=(0.0, 0.2, 1.0),
         z=0.766,
         mass=0.02,
+        rotate_rand=True,
+        rotate_lim=(0.0, 0.0, 0.75),
     ),
 }
 
@@ -150,6 +280,15 @@ def get_object_spec(name: str) -> GapaObjectSpec:
         return OBJECT_SPECS[name]
     except KeyError as exc:
         raise ValueError(f"Unknown GAPA object: {name}") from exc
+
+
+def canonical_object_name(name: str) -> str:
+    normalized = name.strip().lower().replace("_", " ")
+    for object_name, spec in OBJECT_SPECS.items():
+        candidates = {object_name, object_name.replace("_", " "), *(alias.lower() for alias in spec.aliases)}
+        if normalized in candidates:
+            return object_name
+    return name
 
 
 def validate_object_names(names: list[str] | tuple[str, ...] | None) -> list[str]:

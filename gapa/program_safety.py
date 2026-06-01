@@ -8,12 +8,52 @@ from dataclasses import dataclass
 
 ALLOWED_API_METHODS = {
     "pose",
+    "target_pose",
+    "drawer_pose",
+    "drawer_target_pose",
+    "distance",
+    "distance_between_poses",
+    "is_left_of",
+    "is_right_of",
+    "opposite_arm",
     "choose_arm",
+    "choose_arm_from_pose",
+    "choose_arm_for_path",
+    "clearance",
+    "clearance_from_poses",
     "grasp",
+    "grasp_at",
     "move_up",
+    "move_above",
+    "move_above_pose",
+    "clear_path",
+    "open_drawer",
+    "place_at",
+    "place_in_drawer",
     "place_on",
     "place_in",
+    "place_on_center",
+    "place_in_center",
+    "place_on_offset",
     "back_to_origin",
+}
+
+
+RETURN_VALUE_API_METHODS = {
+    "pose",
+    "target_pose",
+    "drawer_pose",
+    "drawer_target_pose",
+    "distance",
+    "distance_between_poses",
+    "is_left_of",
+    "is_right_of",
+    "opposite_arm",
+    "choose_arm",
+    "choose_arm_from_pose",
+    "choose_arm_for_path",
+    "clearance",
+    "clearance_from_poses",
 }
 
 
@@ -92,6 +132,10 @@ class _SafetyValidator(ast.NodeVisitor):
         return
 
     def visit_Expr(self, node: ast.Expr) -> None:
+        if isinstance(node.value, ast.Call):
+            method_name = self._api_method_name(node.value)
+            if method_name in RETURN_VALUE_API_METHODS:
+                self.fail(node, f"api.{method_name} returns a value and must be assigned before use")
         self.visit(node.value)
 
     def visit_Assign(self, node: ast.Assign) -> None:
@@ -110,18 +154,24 @@ class _SafetyValidator(ast.NodeVisitor):
         self.fail(node, "Augmented assignments are not allowed")
 
     def visit_Call(self, node: ast.Call) -> None:
-        if not isinstance(node.func, ast.Attribute) or not isinstance(node.func.value, ast.Name):
+        method_name = self._api_method_name(node)
+        if method_name is None:
             self.fail(node, "Only api.<skill>(...) calls are allowed")
-        if node.func.value.id != "api":
-            self.fail(node, "Only api.<skill>(...) calls are allowed")
-        if node.func.attr not in ALLOWED_API_METHODS:
-            self.fail(node, f"api.{node.func.attr} is not an allowed skill")
+        if method_name not in ALLOWED_API_METHODS:
+            self.fail(node, f"api.{method_name} is not an allowed skill")
         for arg in node.args:
             self.visit(arg)
         for keyword in node.keywords:
             if keyword.arg is None:
                 self.fail(keyword, "Expanded keyword arguments are not allowed")
             self.visit(keyword.value)
+
+    def _api_method_name(self, node: ast.Call) -> str | None:
+        if not isinstance(node.func, ast.Attribute) or not isinstance(node.func.value, ast.Name):
+            return None
+        if node.func.value.id != "api":
+            return None
+        return node.func.attr
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
         self.fail(node, "Attribute access is only allowed as api.<skill>(...)")

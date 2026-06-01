@@ -11,12 +11,27 @@ from gapa.task_dsl import TaskDSL
 
 VALID_SOURCE = """
 def play_once(api):
-    arm = api.choose_arm("cup")
-    api.pose("cup")
-    api.grasp("cup", arm=arm, pre_grasp_dis=0.09, grasp_dis=0.0)
-    api.move_up(arm, z=0.08)
-    api.place_on("cup", "plate", arm=arm, functional_point_id=0, pre_dis=0.08, dis=0.02, constrain="auto")
-    api.move_up(arm, z=0.08, move_axis="arm")
+    source_pose = api.pose("cup")
+    target_pose = api.target_pose("plate", relation="on")
+    arm = api.choose_arm_from_pose(source_pose)
+    lift_z = api.clearance_from_poses(source_pose, target_pose)
+    api.grasp_at("cup", source_pose, arm=arm, pre_grasp_dis=0.09, grasp_dis=0.0)
+    api.move_above_pose(source_pose, arm=arm, z=lift_z)
+    api.place_at("cup", target_pose, arm=arm, functional_point_id=0, pre_dis=0.08, dis=0.02, constrain="auto", relation="on", target_name="plate")
+    api.move_above_pose(target_pose, arm=arm, z=0.08, move_axis="arm")
+""".strip()
+
+
+CABINET_SOURCE = """
+def play_once(api):
+    source_pose = api.pose("mouse")
+    object_arm = api.choose_arm_from_pose(source_pose)
+    drawer_arm = api.opposite_arm(object_arm)
+    api.grasp_at("mouse", source_pose, arm=object_arm, pre_grasp_dis=0.1, grasp_dis=0.0)
+    api.open_drawer("cabinet", arm=drawer_arm, pre_grasp_dis=0.05, pull_dis=0.04, pull_steps=4)
+    api.move_up(object_arm, z=0.15, move_axis="world")
+    drawer_pose = api.drawer_target_pose("cabinet")
+    api.place_in_drawer("mouse", "cabinet", drawer_pose, arm=object_arm, pre_dis=0.13, dis=0.1)
 """.strip()
 
 
@@ -44,9 +59,9 @@ def program_response():
 
 
 class FakePose:
-    def __init__(self, p):
+    def __init__(self, p, q=None):
         self.p = np.array(p, dtype=float)
-        self.q = np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
+        self.q = np.array(q if q is not None else [1.0, 0.0, 0.0, 0.0], dtype=float)
 
 
 class FakeActor:
@@ -67,6 +82,9 @@ class FakeEnv:
         self.actors = {
             "cup": FakeActor([-0.1, 0.0, 0.76]),
             "plate": FakeActor([0.0, -0.13, 0.74]),
+            "red_block": FakeActor([-0.2, -0.1, 0.76]),
+            "mouse": FakeActor([-0.2, -0.1, 0.76]),
+            "cabinet": FakeActor([0.0, 0.155, 0.74]),
         }
         self.gapa_specs = {}
 
@@ -93,6 +111,10 @@ class FakeEnv:
         self.calls.append(("back_to_origin", arm_tag))
         return arm_tag, ["origin"]
 
+    def open_gripper(self, arm_tag):
+        self.calls.append(("open_gripper", arm_tag))
+        return arm_tag, ["open"]
+
     def move(self, *actions):
         self.calls.append(("move", actions))
         return True
@@ -106,6 +128,10 @@ class ProgramSafetyTest(unittest.TestCase):
         report = validate_program_source(VALID_SOURCE)
         self.assertTrue(report.ok)
 
+    def test_valid_cabinet_program_passes(self):
+        report = validate_program_source(CABINET_SOURCE)
+        self.assertTrue(report.ok)
+
     def test_invalid_programs_are_rejected(self):
         invalid_sources = [
             "import os\ndef play_once(api):\n    pass",
@@ -113,6 +139,7 @@ class ProgramSafetyTest(unittest.TestCase):
             "def play_once(api):\n    eval('1')",
             "def play_once(api):\n    grasp('cup')",
             "def play_once(api):\n    api.fly('cup')",
+            "def play_once(api):\n    api.pose('cup')",
             "def play_once(api):\n    for i in [1]:\n        api.pose('cup')",
             "class X:\n    pass\ndef play_once(api):\n    pass",
         ]
@@ -166,6 +193,61 @@ class SafeSkillAPITest(unittest.TestCase):
         self.assertIn("move_by_displacement", call_names)
         self.assertIn("place_actor", call_names)
         self.assertIn("back_to_origin", call_names)
+
+    def test_safe_geometry_helpers(self):
+        env = FakeEnv()
+        api = SafeSkillAPI(env)
+        cup_pose = api.pose("cup")
+        plate_pose = api.target_pose("plate", relation="on")
+
+        self.assertAlmostEqual(api.distance("cup", "plate"), float(np.hypot(-0.1, 0.13)))
+        self.assertAlmostEqual(api.distance_between_poses(cup_pose, plate_pose), float(np.hypot(-0.1, 0.13)))
+        self.assertTrue(api.is_left_of("cup", "plate"))
+        self.assertFalse(api.is_right_of("cup", "plate"))
+        self.assertEqual(api.choose_arm_for_path("cup", "plate"), "left")
+        self.assertEqual(api.choose_arm_from_pose(cup_pose), "left")
+        self.assertAlmostEqual(api.clearance("cup", "plate"), 0.10)
+        self.assertAlmostEqual(api.clearance_from_poses(cup_pose, plate_pose), 0.10)
+
+        api.grasp_at("cup", cup_pose, arm="left")
+        api.move_above_pose(cup_pose, arm="left", z=0.10)
+        api.place_at("cup", plate_pose, arm="left", relation="on", target_name="plate")
+        api.place_on_offset("cup", "plate", dx=0.01, dy=-0.02, arm="left")
+
+        place_calls = [call for call in env.calls if call[0] == "place_actor"]
+        self.assertEqual(len(place_calls), 2)
+        offset_pose = place_calls[-1][1]["target_pose"]
+        self.assertAlmostEqual(offset_pose[0], 0.01)
+        self.assertAlmostEqual(offset_pose[1], -0.15)
+
+    def test_drawer_helpers_call_robotwin_wrappers(self):
+        env = FakeEnv()
+        api = SafeSkillAPI(env)
+        source_pose = api.pose("mouse")
+        object_arm = api.choose_arm_from_pose(source_pose)
+        drawer_arm = api.opposite_arm(object_arm)
+
+        api.grasp_at("mouse", source_pose, arm=object_arm)
+        api.open_drawer("cabinet", arm=drawer_arm, pull_dis=0.04, pull_steps=4)
+        drawer_pose = api.drawer_target_pose("cabinet")
+        api.place_in_drawer("mouse", "cabinet", drawer_pose, arm=object_arm)
+
+        grasp_calls = [call for call in env.calls if call[0] == "grasp_actor"]
+        self.assertEqual(len(grasp_calls), 2)
+        self.assertEqual(str(grasp_calls[-1][1]["arm_tag"]), drawer_arm)
+
+        pull_calls = [
+            call for call in env.calls
+            if call[0] == "move_by_displacement" and call[1].get("y") == -0.04
+        ]
+        self.assertEqual(len(pull_calls), 4)
+        self.assertFalse(any(call[0] == "open_gripper" for call in env.calls))
+        self.assertFalse(any(call[0] == "back_to_origin" for call in env.calls))
+
+        place_calls = [call for call in env.calls if call[0] == "place_actor"]
+        self.assertEqual(len(place_calls), 1)
+        self.assertEqual(place_calls[0][1]["target_pose"], drawer_pose)
+        self.assertIsNone(place_calls[0][1]["functional_point_id"])
 
     def test_execute_program_candidate(self):
         env = FakeEnv()

@@ -32,11 +32,22 @@ python -m uvicorn gapa.web_app:app --host 127.0.0.1 --port 7860
 
 `gapa/object_registry.py`
 
-定义当前支持的物体池和能力。现在只包含 6 个物体：
+定义当前支持的物体池和能力。现在包含基础物体、官方 cabinet 小物体和 drawer 目标：
 
 - `cup`
 - `bowl`
 - `plate`
+- `cabinet`
+- `mouse`
+- `stapler`
+- `toy_car`
+- `rubiks_cube`
+- `bread`
+- `phone`
+- `playing_cards`
+- `tea_box`
+- `coffee_box`
+- `soap`
 - `red_block`
 - `green_block`
 - `blue_block`
@@ -116,11 +127,32 @@ LLM 必须返回 JSON：`{"programs": [{"program_id": "...", "source": "def play
 这是生成程序能访问的安全执行接口。它暴露：
 
 - `api.pose(name)`
+- `api.target_pose(name, relation="on")`
+- `api.drawer_pose(cabinet)`
+- `api.drawer_target_pose(cabinet)`
+- `api.distance(name, target)`
+- `api.distance_between_poses(source_pose, target_pose)`
+- `api.is_left_of(name, target)` / `api.is_right_of(name, target)`
+- `api.opposite_arm(arm)`
 - `api.choose_arm(name)`
+- `api.choose_arm_from_pose(pose)`
+- `api.choose_arm_for_path(name, target)`
+- `api.clearance(name, target=None)`
+- `api.clearance_from_poses(source_pose, target_pose)`
 - `api.grasp(...)`
+- `api.grasp_at(name, source_pose, ...)`
 - `api.move_up(...)`
+- `api.move_above(...)`
+- `api.move_above_pose(pose, ...)`
+- `api.clear_path(...)`
+- `api.open_drawer(cabinet, arm, ...)`
+- `api.place_at(name, target_pose, ...)`
+- `api.place_in_drawer(name, cabinet, target_pose, arm, ...)`
 - `api.place_on(...)`
 - `api.place_in(...)`
+- `api.place_on_center(...)`
+- `api.place_in_center(...)`
+- `api.place_on_offset(...)`
 - `api.back_to_origin(...)`
 
 这些方法内部再调用 `env.grasp_actor(...)`、`env.place_actor(...)`、`env.move_by_displacement(...)`、`env.back_to_origin(...)` 等 RoboTwin 高层函数。左右臂选择仍按被抓物体的 x 坐标决定：
@@ -129,6 +161,12 @@ LLM 必须返回 JSON：`{"programs": [{"program_id": "...", "source": "def play
 x < 0 -> left
 x >= 0 -> right
 ```
+
+更复杂的几何判断不让 LLM 直接写 `if` 或手动算 pose，而是封装在安全 API 里。例如 `choose_arm_from_pose()` 会根据显式 source pose 选择手臂，`clearance_from_poses()` 会根据 source-target pose 的 XY 距离返回保守抬升高度，`place_at()` 会把 LLM 获取到的 target pose 显式传给 RoboTwin 放置接口。这样生成代码仍然是受限 Python，但代码形态更接近官方 `play_once`：先获取 pose，再把 pose 传入动作函数。
+
+当前 `api.pose()` 和 `api.target_pose()` 仍然直接从仿真环境读取对象/目标位姿。后续如果接入 VLM，可以把这两个 API 的实现替换成“图像 2D 检测 -> 相机标定/深度 -> 3D pose”，上层 LLM 生成的 `play_once(api)` 结构不需要大改。
+
+`cabinet/drawer` 任务使用官方 `put_object_cabinet` 的双臂思路：一只手抓住桌面物体，另一只手通过 `open_drawer()` 抓抽屉把手并向外拉，再用 `place_in_drawer()` 把物体放到 `drawer_target_pose()`。
 
 对于 cup/bowl，会根据左右臂自动选择接触点。现在没有 oracle teleport 修正：如果生成程序调用的动作失败，或者最后 success check 失败，就记录失败。
 
@@ -229,6 +267,7 @@ runs_gapa/{run_id}/task_dsl.json
 
 - 单步 `put/place source in target`
 - 单步 `put/place source on target`
+- 双臂抽屉任务 `put/place source in drawer/cabinet`
 - 中英文物体别名
 - 用户手动选择场景物体
 - 四相机初始图

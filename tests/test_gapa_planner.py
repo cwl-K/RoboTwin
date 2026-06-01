@@ -4,12 +4,24 @@ import unittest
 
 import numpy as np
 
-from gapa.object_registry import OBJECT_SPECS, SELECTABLE_OBJECTS, object_options, validate_object_names
+from gapa.object_registry import (
+    OBJECT_SPECS,
+    OFFICIAL_CABINET_SOURCE_OBJECTS,
+    SELECTABLE_OBJECTS,
+    canonical_object_name,
+    object_options,
+    validate_object_names,
+)
 from gapa.planner import TaskPlanner
 
 try:
     from envs.gapa_scene import (
+        CABINET_X_RANGE,
+        CABINET_Y_RANGE,
         NON_OVERLAP_MARGIN,
+        OFFICIAL_CABINET_SOURCE_CENTER_X_EXCLUSION,
+        OFFICIAL_CABINET_SOURCE_X_RANGE,
+        OFFICIAL_CABINET_SOURCE_Y_RANGE,
         SOURCE_CENTER_X_EXCLUSION,
         SOURCE_X_RANGE,
         SOURCE_Y_RANGE,
@@ -50,12 +62,8 @@ def parse_response(object_name, target_name, relation):
 class GapaPlannerTest(unittest.TestCase):
     def setUp(self):
         self.scene = {
-            "cup": {"roles": ["source", "target"]},
-            "bowl": {"roles": ["source", "target"]},
-            "plate": {"roles": ["target"]},
-            "red_block": {"roles": ["source", "target"]},
-            "green_block": {"roles": ["source", "target"]},
-            "blue_block": {"roles": ["source", "target"]},
+            name: {"roles": list(spec.roles), "target_relations": list(spec.target_relations)}
+            for name, spec in OBJECT_SPECS.items()
         }
 
     def test_parse_english_put_on(self):
@@ -81,6 +89,35 @@ class GapaPlannerTest(unittest.TestCase):
         self.assertEqual(result.dsl.object_name, "red_block")
         self.assertEqual(result.dsl.target_name, "green_block")
         self.assertEqual(result.dsl.relation, "on")
+
+    def test_parse_drawer_task(self):
+        planner = TaskPlanner(llm_client=FakeLLMClient(parse_response("mouse", "cabinet", "in")), use_llm=True)
+        result = planner.parse("put mouse in drawer", self.scene)
+        self.assertTrue(result.dsl.feasible)
+        self.assertEqual(result.dsl.object_name, "mouse")
+        self.assertEqual(result.dsl.target_name, "cabinet")
+        self.assertEqual(result.dsl.relation, "in")
+
+    def test_parse_chinese_drawer_task(self):
+        planner = TaskPlanner(llm_client=FakeLLMClient(parse_response("mouse", "cabinet", "in")), use_llm=True)
+        result = planner.parse("把鼠标放进抽屉", self.scene)
+        self.assertTrue(result.dsl.feasible)
+        self.assertEqual(result.dsl.object_name, "mouse")
+        self.assertEqual(result.dsl.target_name, "cabinet")
+        self.assertEqual(result.dsl.relation, "in")
+
+    def test_drawer_task_rejects_non_official_sources(self):
+        planner = TaskPlanner(llm_client=FakeLLMClient(parse_response("cup", "cabinet", "in")), use_llm=True)
+        result = planner.parse("put cup in drawer", self.scene)
+        self.assertFalse(result.dsl.feasible)
+        self.assertIn("Cabinet drawer MVP", result.dsl.reason)
+
+    def test_parse_canonicalizes_drawer_alias(self):
+        planner = TaskPlanner(llm_client=FakeLLMClient(parse_response("computer mouse", "drawer", "in")), use_llm=True)
+        result = planner.parse("put computer mouse in drawer", self.scene)
+        self.assertTrue(result.dsl.feasible)
+        self.assertEqual(result.dsl.object_name, "mouse")
+        self.assertEqual(result.dsl.target_name, "cabinet")
 
     def test_infeasible_missing_object(self):
         planner = TaskPlanner(llm_client=FakeLLMClient(parse_response("spoon", "basket", "in")), use_llm=True)
@@ -111,9 +148,43 @@ class GapaPlannerTest(unittest.TestCase):
 
 
 class GapaRegistryTest(unittest.TestCase):
-    def test_registry_contains_only_new_objects(self):
-        self.assertEqual(set(SELECTABLE_OBJECTS), {"cup", "bowl", "plate", "red_block", "green_block", "blue_block"})
+    def test_registry_contains_selectable_objects(self):
+        self.assertEqual(set(SELECTABLE_OBJECTS), {
+            "cup",
+            "bowl",
+            "plate",
+            "cabinet",
+            "mouse",
+            "stapler",
+            "toy_car",
+            "rubiks_cube",
+            "bread",
+            "phone",
+            "playing_cards",
+            "tea_box",
+            "coffee_box",
+            "soap",
+            "red_block",
+            "green_block",
+            "blue_block",
+        })
         self.assertEqual({option["name"] for option in object_options()}, set(SELECTABLE_OBJECTS))
+        self.assertEqual(OBJECT_SPECS["cabinet"].target_relations, ("in",))
+        self.assertEqual(tuple(OFFICIAL_CABINET_SOURCE_OBJECTS), (
+            "mouse",
+            "stapler",
+            "toy_car",
+            "rubiks_cube",
+            "bread",
+            "phone",
+            "playing_cards",
+            "tea_box",
+            "coffee_box",
+            "soap",
+        ))
+        self.assertEqual(canonical_object_name("drawer"), "cabinet")
+        self.assertEqual(canonical_object_name("红色方块"), "red_block")
+        self.assertEqual(canonical_object_name("鼠标"), "mouse")
 
     def test_validate_object_names_rejects_empty_and_unknown(self):
         with self.assertRaisesRegex(ValueError, "Select at least one"):
@@ -134,7 +205,8 @@ class GapaSceneLayoutTest(unittest.TestCase):
 
     def test_sample_non_overlapping_layout(self):
         np.random.seed(13)
-        selected = [(alias, OBJECT_SPECS[alias]) for alias in SELECTABLE_OBJECTS]
+        selected_names = ["cup", "plate", "red_block", "mouse", "phone"]
+        selected = [(alias, OBJECT_SPECS[alias]) for alias in selected_names]
         placements = _sample_scene_layout(selected)
 
         accepted = {}
@@ -157,7 +229,34 @@ class GapaSceneLayoutTest(unittest.TestCase):
                 self.assertGreater(distance, min_distance, f"{alias} overlaps {other_alias}")
             accepted[alias] = (x, y, spec.footprint_radius)
 
-        self.assertEqual(len(accepted), len(SELECTABLE_OBJECTS))
+        self.assertEqual(len(accepted), len(selected))
+
+    def test_cabinet_layout_uses_official_source_range(self):
+        np.random.seed(23)
+        selected_names = ["cabinet", "mouse", "phone"]
+        selected = [(alias, OBJECT_SPECS[alias]) for alias in selected_names]
+        placements = _sample_scene_layout(selected)
+
+        cabinet_x, cabinet_y = placements["cabinet"]
+        self.assertGreaterEqual(cabinet_x, CABINET_X_RANGE[0])
+        self.assertLessEqual(cabinet_x, CABINET_X_RANGE[1])
+        self.assertGreaterEqual(cabinet_y, CABINET_Y_RANGE[0])
+        self.assertLessEqual(cabinet_y, CABINET_Y_RANGE[1])
+
+        accepted = {}
+        for alias, spec in selected:
+            x, y = placements[alias]
+            if alias != "cabinet":
+                self.assertGreaterEqual(x, OFFICIAL_CABINET_SOURCE_X_RANGE[0])
+                self.assertLessEqual(x, OFFICIAL_CABINET_SOURCE_X_RANGE[1])
+                self.assertGreaterEqual(y, OFFICIAL_CABINET_SOURCE_Y_RANGE[0])
+                self.assertLessEqual(y, OFFICIAL_CABINET_SOURCE_Y_RANGE[1])
+                self.assertGreaterEqual(abs(x), OFFICIAL_CABINET_SOURCE_CENTER_X_EXCLUSION)
+            for other_alias, (other_x, other_y, other_radius) in accepted.items():
+                distance = math.hypot(x - other_x, y - other_y)
+                min_distance = spec.footprint_radius + other_radius + NON_OVERLAP_MARGIN
+                self.assertGreater(distance, min_distance, f"{alias} overlaps {other_alias}")
+            accepted[alias] = (x, y, spec.footprint_radius)
 
 
 if __name__ == "__main__":
