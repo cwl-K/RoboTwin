@@ -8,7 +8,8 @@ envs/curobo
 *.zip
 viewer_show.*
 eval_video/
-task_config/
+task_config/*
+!task_config/gapa_scene.yml
 **/.DS_Store
 
 # eval result
@@ -28,3 +29,16 @@ envs/curobo/*
 
 /*.json*
 /*.txt
+
+.codex
+
+# GAPA local runtime outputs and secrets.
+runs_gapa/
+/gapa/gapa_api.env
+.venv/
+*.mp4
+*.png
+*.jsonl
+*.pkl
+
+/codex_prompt.md
