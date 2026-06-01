@@ -305,7 +305,7 @@ class GapaRunner:
         camera = getattr(env.cameras, "world_camera1", None)
         if camera is None:
             return env.cameras.get_observer_rgb()
-            camera.take_picture()
+        camera.take_picture()
         rgba = camera.get_picture("Color")
         return (rgba * 255).clip(0, 255).astype("uint8")[:, :, :3]
 
