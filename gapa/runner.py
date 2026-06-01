@@ -234,6 +234,7 @@ class GapaRunner:
             "program_source": (best_program.metadata or {}).get("program_source"),
             "validation": validation["results"],
             "video": self._public_path(video_path) if video_path else None,
+            "success_check": execution.get("success_check"),
             "vlm_status": self.vlm_perception.locate(self.current_env, dsl.object_name),
         }
         _write_json(run_dir / "summary.json", summary)
@@ -376,11 +377,12 @@ class GapaRunner:
             "program_id": candidate.program_id,
             "status": "success" if failure is None else "failed",
             "failure": None if failure is None else failure.to_dict(),
+            "success_check": getattr(self.current_env, "gapa_last_success_details", None),
         }
         _append_jsonl(run_dir / "attempts.jsonl", record)
         if failure is None:
-            return {"status": "success", "attempt_id": 1}
-        return {"status": "failed", "failure": failure.to_dict()}
+            return {"status": "success", "attempt_id": 1, "success_check": record["success_check"]}
+        return {"status": "failed", "failure": failure.to_dict(), "success_check": record["success_check"]}
 
     def _enable_collect_data_video(self, env: "GapaScene", run_dir: Path) -> None:
         env.save_data = True

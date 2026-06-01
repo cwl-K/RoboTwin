@@ -207,6 +207,7 @@ class GapaScene(Base_Task):
         self.gapa_object_names: list[str] = []
         self.gapa_task_origin_z: float | None = None
         self.gapa_task_arm_tag: str | None = None
+        self.gapa_last_success_details: dict[str, Any] | None = None
         self.active_task = None
         self.active_plan = None
 
@@ -225,6 +226,7 @@ class GapaScene(Base_Task):
         self.gapa_specs = {}
         self.gapa_task_origin_z = None
         self.gapa_task_arm_tag = None
+        self.gapa_last_success_details = None
         selected_specs = _select_scene_specs(self.gapa_object_names)
         placements = _sample_scene_layout(selected_specs)
 
@@ -326,8 +328,13 @@ class GapaScene(Base_Task):
         return target.get_pose()
 
     def check_success(self):
+        details = self.get_success_details()
+        self.gapa_last_success_details = details
+        return bool(details.get("success"))
+
+    def get_success_details(self) -> dict[str, Any]:
         if self.active_task is None:
-            return False
+            return {"success": False, "reason": "No active task."}
         obj = self.get_actor(self.active_task.object_name)
         target = self.get_actor(self.active_task.target_name)
         obj_p = np.array(obj.get_pose().p)
@@ -338,18 +345,55 @@ class GapaScene(Base_Task):
             if origin_z is None:
                 origin_z = obj_p[2]
             arm_tag = self.gapa_task_arm_tag
+            left_gripper_value = float(self.robot.get_left_gripper_val())
+            right_gripper_value = float(self.robot.get_right_gripper_val())
             if arm_tag == "left":
                 gripper_open = self.robot.is_left_gripper_open()
             elif arm_tag == "right":
                 gripper_open = self.robot.is_right_gripper_open()
             else:
                 gripper_open = False
-            tag = np.all(abs(obj_p[:2] - target_p[:2]) < np.array([0.05, 0.05]))
-            height_delta = obj_p[2] - float(origin_z)
-            return height_delta > 0.007 and height_delta < 0.12 and tag and gripper_open
+            xy_abs = np.abs(obj_p[:2] - target_p[:2])
+            xy_ok = bool(np.all(xy_abs < np.array([0.05, 0.05])))
+            height_delta = float(obj_p[2] - float(origin_z))
+            height_ok = bool(0.007 < height_delta < 0.12)
+            success = bool(height_ok and xy_ok and gripper_open)
+            return {
+                "success": success,
+                "mode": "cabinet_in_official",
+                "object_name": self.active_task.object_name,
+                "target_name": self.active_task.target_name,
+                "object_pose": obj_p.tolist(),
+                "target_pose": target_p.tolist(),
+                "xy_abs": xy_abs.tolist(),
+                "xy_limit": [0.05, 0.05],
+                "xy_ok": xy_ok,
+                "origin_z": float(origin_z),
+                "height_delta": height_delta,
+                "height_limit": [0.007, 0.12],
+                "height_ok": height_ok,
+                "arm_tag": arm_tag,
+                "left_gripper_value": left_gripper_value,
+                "right_gripper_value": right_gripper_value,
+                "gripper_open": bool(gripper_open),
+            }
         target_p = np.array(target.get_pose().p)
-        xy_dist = np.linalg.norm(obj_p[:2] - target_p[:2])
-        height_ok = obj_p[2] >= target_p[2] - 0.02
+        xy_dist = float(np.linalg.norm(obj_p[:2] - target_p[:2]))
+        height_ok = bool(obj_p[2] >= target_p[2] - 0.02)
         if self.active_task.relation == "in":
-            return xy_dist < 0.16 and height_ok
-        return xy_dist < 0.12 and height_ok
+            xy_limit = 0.16
+        else:
+            xy_limit = 0.12
+        xy_ok = bool(xy_dist < xy_limit)
+        return {
+            "success": bool(xy_ok and height_ok),
+            "mode": f"{self.active_task.relation}_generic",
+            "object_name": self.active_task.object_name,
+            "target_name": self.active_task.target_name,
+            "object_pose": obj_p.tolist(),
+            "target_pose": target_p.tolist(),
+            "xy_distance": xy_dist,
+            "xy_limit": xy_limit,
+            "xy_ok": xy_ok,
+            "height_ok": height_ok,
+        }

@@ -587,11 +587,15 @@ def execute_program_candidate(
         )
 
     if not env.check_success():
+        details = {"program_id": candidate.program_id}
+        success_details = getattr(env, "gapa_last_success_details", None)
+        if success_details is not None:
+            details["success_check"] = success_details
         return FailureReport(
             attempt_id=attempt_id,
             stage="success_check",
             message="Program executed but task success condition failed.",
             action="none",
-            details={"program_id": candidate.program_id},
+            details=details,
         )
     return None
