@@ -17,8 +17,8 @@ import inspect
 current_file_path = os.path.abspath(__file__)
 parent_directory = os.path.dirname(current_file_path)
 
-SCRIPT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "script")
-CONFIGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "task_config")
+SCRIPT_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "script")
+CONFIGS_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "task_config")
 OBJECTS_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets/objects")
 
 

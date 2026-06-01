@@ -3,7 +3,13 @@ import os
 import glob
 from openai import OpenAI
 
-from gpt_agent import kimi_api, openai_api, deep_seek_api, generate
+from gpt_agent import generate
+
+try:
+    from gapa.api_env import load_api_env
+except ImportError:
+    def load_api_env():
+        return None
 
 
 def observe_task_execution(episode_id, task_name, task_info, problematic_code=None, save_dir="./camera_images", camera_name=None, generate_dir_name=None):
@@ -22,9 +28,13 @@ def observe_task_execution(episode_id, task_name, task_info, problematic_code=No
     Returns:
     str: Textual description of the observation result.
     """
+    load_api_env()
+    api_key = os.getenv("KIMI_API_KEY")
+    if not api_key:
+        raise RuntimeError("Missing KIMI_API_KEY for observation image analysis.")
     client = OpenAI(
-        api_key=kimi_api,
-        base_url="https://api.moonshot.cn/v1",
+        api_key=api_key,
+        base_url=os.getenv("KIMI_BASE_URL", "https://api.moonshot.cn/v1"),
     )
     
     # Check if the save_dir already contains the task name
@@ -125,7 +135,7 @@ You will see execution images for the following steps: {', '.join(step_names)}
     # Call the image analysis API
     try:
         response = client.chat.completions.create(
-            model="moonshot-v1-32k-vision-preview",
+            model=os.getenv("KIMI_VISION_MODEL", "moonshot-v1-32k-vision-preview"),
             messages=[
                 {"role": "system", "content": "You are a robot task execution analysis expert. Please analyze the provided image sequence."},
                 {"role": "user", "content": user_content}
