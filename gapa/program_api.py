@@ -121,6 +121,7 @@ class SafeSkillAPI:
         self.attempt_id = attempt_id
         self.held: dict[str, ArmTag] = {}
         self.last_gripper: ArmTag | None = None
+        self.stage_events: list[dict[str, Any]] = []
         self.step_index = 0
 
     def pose(self, name: str) -> list[float]:
@@ -268,6 +269,11 @@ class SafeSkillAPI:
         if active_task is not None and getattr(active_task, "object_name", None) == name:
             setattr(self.env, "gapa_task_arm_tag", str(arm_tag))
         self._snapshot(f"grasp_{name}")
+        self.stage_events.append({
+            "stage": "grasp", "api_call": "grasp_at", "object_name": name,
+            "arm": str(arm_tag), "args": {"pre_grasp_dis": pre_grasp_dis, "grasp_dis": grasp_dis},
+            "before": {}, "after": {}, "exception": None,
+        })
 
     def move_up(self, arm: str, z: float = 0.08, move_axis: str = "world") -> None:
         arm_tag = ArmTag(arm)
@@ -603,6 +609,12 @@ class SafeSkillAPI:
         self.held.pop(name, None)
         self.last_gripper = arm_tag
         self._snapshot(f"place_{relation}_{name}_{target_label}")
+        self.stage_events.append({
+            "stage": "place", "api_call": f"place_{relation}", "object_name": name,
+            "target_name": target_name, "relation": relation, "arm": str(arm_tag),
+            "args": {"pre_dis": pre_dis, "dis": dis},
+            "before": {}, "after": {}, "exception": None,
+        })
 
     def _require_moved(self, moved: Any, stage: str, message: str) -> None:
         if not moved or not self.env.plan_success:
@@ -678,6 +690,7 @@ def execute_program_candidate(
         success_details = getattr(env, "gapa_last_success_details", None)
         if success_details is not None:
             details["success_check"] = success_details
+            success_details["stages"] = api.stage_events
         return FailureReport(
             attempt_id=attempt_id,
             stage="success_check",
@@ -685,4 +698,8 @@ def execute_program_candidate(
             action="none",
             details=details,
         )
+    # 成功时也保存 stage events
+    success_details = getattr(env, "gapa_last_success_details", None) or {}
+    success_details["stages"] = api.stage_events
+    env.gapa_last_success_details = success_details
     return None
