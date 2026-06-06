@@ -105,11 +105,13 @@ class ProgramCodeGenerator:
         instruction: str,
         task: TaskDSL,
         scene_objects: dict[str, dict[str, Any]],
+        failure_report: Optional[FailureReport] = None,
+        previous_program: Optional[str] = None,
     ) -> list[ProgramCandidate]:
         if not self.llm_client.is_configured:
             raise RuntimeError("GAPA LLM is not configured. Check gapa/gapa_api.env.")
 
-        prompt = self._build_prompt(instruction, task, scene_objects)
+        prompt = self._build_prompt(instruction, task, scene_objects, failure_report, previous_program)
         raw = self.llm_client.chat([
             {"role": "system", "content": "You generate safe, restricted Python play_once(api) programs for RoboTwin."},
             {"role": "user", "content": prompt},
@@ -148,7 +150,7 @@ class ProgramCodeGenerator:
             metadata=metadata,
         )
 
-    def _build_prompt(self, instruction: str, task: TaskDSL, scene_objects: dict[str, dict[str, Any]]) -> str:
+    def _build_prompt(self, instruction: str, task: TaskDSL, scene_objects: dict[str, dict[str, Any]], failure_report: Optional[FailureReport] = None, previous_program: Optional[str] = None) -> str:
         scene_summary = {
             name: {
                 "roles": data.get("roles", []),
@@ -171,6 +173,20 @@ class ProgramCodeGenerator:
             if task.task_type == "row_order"
             else ""
         )
+        feedback_section = ""
+        if failure_report and failure_report.status == "failed":
+            feedback_section = f"""
+Previous attempt failed at stage: {failure_report.failed_stage}
+Failure type: {failure_report.failure_type}
+Evidence: {chr(39).join(failure_report.evidence) if failure_report.evidence else "none"}
+Suggested action: {failure_report.suggested_action}
+LLM feedback: {failure_report.llm_feedback or "none"}
+
+Use this feedback to generate programs that fix the failure. If the grasp failed, try a different arm, larger pre_grasp_dis, or different approach direction. If the place failed, adjust the target position.
+"""
+        elif previous_program:
+            feedback_section = f"Previous program:\n```python\n{previous_program}\n```\nDo not repeat this program. Generate different strategies."
+
         return f"""
 Generate exactly 3 candidate Python programs for this RoboTwin task.
 
@@ -204,5 +220,5 @@ Hard constraints:
 - Choose diverse but conservative strategies and movement parameters across the 3 programs.
 
 Example source:
-{example_program}
+{example_program}{feedback_section}
 """.strip()

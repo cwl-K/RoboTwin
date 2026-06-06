@@ -21,7 +21,8 @@ from .perception import OraclePerception, VLMPerception
 from .planner import TaskPlanner
 from .program_api import ProgramCandidate, execute_program_candidate
 from .program_codegen import ProgramCodeGenerator
-from .task_dsl import TaskDSL
+from .task_dsl import FailureReport, TaskDSL
+from .feedback import FeedbackProvider, RuleBasedFeedbackProvider, StageEvent
 
 if TYPE_CHECKING:
     from envs.gapa_scene import GapaScene
@@ -221,21 +222,98 @@ class GapaRunner:
             _write_json(run_dir / "summary.json", summary)
             return self.get_run(run_id)
 
-        self._enable_collect_data_video(self.current_env, run_dir)
-        execution = self._execute_program_once(best_program, dsl, run_dir)
+        # ── Feedback 闭环 ──
+        MAX_REPLAN_ATTEMPTS = 2
+        feedback_provider: FeedbackProvider = RuleBasedFeedbackProvider()
+        current_program = best_program
+        attempt = 1
+
+        while attempt <= MAX_REPLAN_ATTEMPTS + 1:
+            self._enable_collect_data_video(self.current_env, run_dir)
+            execution = self._execute_program_once(current_program, dsl, run_dir)
+
+            stage_events = self._collect_stage_events(
+                run_id=run_id, attempt_id=attempt, program_id=current_program.program_id,
+            )
+            _append_jsonl(run_dir / "stage_events.jsonl", [e.to_dict() for e in stage_events])
+
+            success_check = execution.get("success_check", {})
+            task_succeeded = success_check.get("success", False) if success_check else (execution["status"] == "success")
+
+            if task_succeeded:
+                video_path = self._build_video(run_dir, self.current_env)
+                summary = {
+                    "run_id": run_id,
+                    "status": "success",
+                    "instruction": instruction,
+                    "task_dsl": dsl.to_dict(),
+                    "best_program_id": current_program.program_id,
+                    "best_program_path": current_program.path,
+                    "program_source": (current_program.metadata or {}).get("program_source"),
+                    "validation": validation["results"],
+                    "video": self._public_path(video_path) if video_path else None,
+                    "success_check": success_check,
+                    "vlm_status": self.vlm_perception.locate(self.current_env, dsl.object_name),
+                    "total_attempts": attempt,
+                }
+                _write_json(run_dir / "summary.json", summary)
+                return self.get_run(run_id)
+
+            # 失败 -> 生成 failure_report
+            failed_event = stage_events[-1] if stage_events else StageEvent(
+                run_id=run_id, attempt_id=attempt, program_id=current_program.program_id,
+                stage="final_success", api_call="unknown", object_name=dsl.object_name,
+                exception=str(execution.get("failure", "unknown error")),
+            )
+            context = {
+                "natural_language_task": instruction,
+                "task_dsl": dsl.to_dict(),
+                "scene_objects": self.current_scene,
+                "program_source": (current_program.metadata or {}).get("program_source", ""),
+                "attempt_history": _read_jsonl(run_dir / "attempts.jsonl"),
+                "allowed_api": ["pose", "grasp_at", "open_drawer", "place_in_drawer", "place_at"],
+            }
+            failure_report = feedback_provider.evaluate(failed_event, context)
+            _append_jsonl(run_dir / "failure_reports.jsonl", [failure_report.to_dict()])
+
+            if attempt > MAX_REPLAN_ATTEMPTS:
+                break
+
+            # ── Replan ──
+            replan_request = {
+                "task_dsl": dsl.to_dict(),
+                "scene_objects": self.current_scene,
+                "previous_program": (current_program.metadata or {}).get("program_source", ""),
+                "failure_report": failure_report.to_dict(),
+                "required_output": {"program_count": 3, "function_name": "play_once", "allowed_calls_only": True},
+            }
+            _append_jsonl(run_dir / "replan_requests.jsonl", [replan_request])
+
+            new_candidates = ProgramCodeGenerator(self.planner.llm_client).generate_programs(
+                instruction=instruction, task=dsl, scene_objects=self.current_scene,
+                failure_report=failure_report,
+                previous_program=(current_program.metadata or {}).get("program_source"),
+            )
+            _write_json(run_dir / f"replan_programs_attempt_{attempt + 1}.json", {
+                "programs": [{"program_id": c.program_id, "source": (c.metadata or {}).get("program_source")} for c in new_candidates],
+            })
+            replan_validation = self._validate_program_candidates(new_candidates, dsl)
+            next_program = replan_validation["best_program"]
+            if next_program is None:
+                break
+            current_program = next_program
+            attempt += 1
+
+        # 全部失败
         video_path = self._build_video(run_dir, self.current_env)
         summary = {
             "run_id": run_id,
-            "status": execution["status"],
+            "status": "failed",
+            "reason": "All attempts failed after feedback loop.",
             "instruction": instruction,
             "task_dsl": dsl.to_dict(),
-            "best_program_id": best_program.program_id,
-            "best_program_path": best_program.path,
-            "program_source": (best_program.metadata or {}).get("program_source"),
-            "validation": validation["results"],
+            "total_attempts": attempt,
             "video": self._public_path(video_path) if video_path else None,
-            "success_check": execution.get("success_check"),
-            "vlm_status": self.vlm_perception.locate(self.current_env, dsl.object_name),
         }
         _write_json(run_dir / "summary.json", summary)
         return self.get_run(run_id)
@@ -406,7 +484,7 @@ class GapaRunner:
             frames.append(imageio.imread(image_file))
         video_path = run_dir / "demo.mp4"
         try:
-            _images_to_video(np.asarray(frames), video_path, fps=2.0)
+            self._images_to_video(np.asarray(frames), video_path, fps=2.0)
             return video_path
         except Exception:
             fallback = run_dir / "video_error.txt"
@@ -449,46 +527,59 @@ class GapaRunner:
         self.current_scene_seed = None
         self.current_object_names = None
 
+    def _collect_stage_events(self, run_id: str, attempt_id: int, program_id: str) -> list:
+        from gapa.feedback import StageEvent
+        events = []
+        env = self.current_env
+        if env is None:
+            return events
+        success_details = getattr(env, "gapa_last_success_details", None) or {}
+        for stage_info in success_details.get("stages", []):
+            events.append(StageEvent(
+                run_id=run_id, attempt_id=attempt_id, program_id=program_id,
+                stage=stage_info.get("stage", "unknown"),
+                api_call=stage_info.get("api_call", ""),
+                object_name=stage_info.get("object_name", ""),
+                target_name=stage_info.get("target_name"),
+                relation=stage_info.get("relation"),
+                arm=stage_info.get("arm", "left"),
+                before=stage_info.get("before", {}),
+                after=stage_info.get("after", {}),
+                exception=stage_info.get("exception"),
+            ))
+        if not events:
+            task_success = success_details.get("success", False)
+            events.append(StageEvent(
+                run_id=run_id, attempt_id=attempt_id, program_id=program_id,
+                stage="final_success", api_call="execute",
+                object_name=success_details.get("object_name", ""),
+                exception=None if task_success else success_details.get("reason", "Task check failed"),
+                before={}, after={"success": task_success},
+            ))
+        return events
+
+    def _images_to_video(self, imgs, out_path: Path, fps: float = 2.0) -> None:
+        import subprocess
+        import numpy as np
+        imgs = np.asarray(imgs)
+        if imgs.ndim != 4 or imgs.shape[3] not in (3, 4):
+            raise ValueError("imgs must have shape (N, H, W, C).")
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        _, height, width, channels = imgs.shape
+        ffmpeg = subprocess.Popen(
+            ["ffmpeg", "-y", "-f", "rawvideo", "-vcodec", "rawvideo",
+             "-s", f"{width}x{height}", "-pix_fmt", "rgb24",
+             "-r", str(fps), "-i", "-", "-an", "-vcodec", "libx264",
+             "-pix_fmt", "yuv420p", str(out_path)],
+            stdin=subprocess.PIPE,
+        )
+        assert ffmpeg.stdin is not None
+        ffmpeg.stdin.write(imgs[..., :3].tobytes())
+        ffmpeg.stdin.close()
+        if ffmpeg.wait() != 0:
+            raise IOError("ffmpeg failed while writing GAPA demo video.")
+
+
 
 RUNNER = GapaRunner()
 
-
-def _images_to_video(imgs: np.ndarray, out_path: Path, fps: float = 2.0) -> None:
-    import subprocess
-
-    if imgs.ndim != 4 or imgs.shape[3] not in (3, 4):
-        raise ValueError("imgs must have shape (N, H, W, C).")
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    _, height, width, channels = imgs.shape
-    pixel_format = "rgb24" if channels == 3 else "rgba"
-    ffmpeg = subprocess.Popen(
-        [
-            "ffmpeg",
-            "-y",
-            "-loglevel",
-            "error",
-            "-f",
-            "rawvideo",
-            "-pixel_format",
-            pixel_format,
-            "-video_size",
-            f"{width}x{height}",
-            "-framerate",
-            str(fps),
-            "-i",
-            "-",
-            "-pix_fmt",
-            "yuv420p",
-            "-vcodec",
-            "libx264",
-            "-crf",
-            "23",
-            str(out_path),
-        ],
-        stdin=subprocess.PIPE,
-    )
-    assert ffmpeg.stdin is not None
-    ffmpeg.stdin.write(imgs.tobytes())
-    ffmpeg.stdin.close()
-    if ffmpeg.wait() != 0:
-        raise IOError("ffmpeg failed while writing GAPA demo video.")
